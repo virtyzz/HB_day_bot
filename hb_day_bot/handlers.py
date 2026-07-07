@@ -307,6 +307,7 @@ def register_handlers(storage: Storage, config: Config) -> Router:
             remind_time=updated["remind_time"],
             remind_timezone=updated["remind_timezone"],
             note=updated["note"],
+            reset_last_reminded=_reminder_schedule_changed(record, updated),
         )
         await state.clear()
         logger.info(
@@ -516,6 +517,7 @@ def register_handlers(storage: Storage, config: Config) -> Router:
                 remind_time=updated["remind_time"],
                 remind_timezone=updated["remind_timezone"],
                 note=updated["note"],
+                reset_last_reminded=_reminder_schedule_changed(record, updated),
             )
             await state.clear()
             logger.info(
@@ -763,6 +765,16 @@ def _record_to_dict(record: BirthdayRecord) -> dict[str, Any]:
         "remind_timezone": record.remind_timezone,
         "note": record.note,
     }
+
+
+def _reminder_schedule_changed(record: BirthdayRecord, updated: dict[str, Any]) -> bool:
+    return (
+        record.day != updated["day"]
+        or record.month != updated["month"]
+        or record.year != updated["year"]
+        or record.remind_time != updated["remind_time"]
+        or record.remind_timezone != updated["remind_timezone"]
+    )
 
 
 def _apply_edit(updated: dict[str, Any], field: str, raw: str) -> None:

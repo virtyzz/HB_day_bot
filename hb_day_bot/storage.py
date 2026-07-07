@@ -189,6 +189,7 @@ class Storage:
         remind_time: str,
         remind_timezone: str,
         note: str | None,
+        reset_last_reminded: bool = False,
     ) -> bool:
         async with aiosqlite.connect(self.database_path) as db:
             cursor = await db.execute(
@@ -200,7 +201,8 @@ class Storage:
                     year = ?,
                     remind_time = ?,
                     remind_timezone = ?,
-                    note = ?
+                    note = ?,
+                    last_reminded_year = CASE WHEN ? THEN NULL ELSE last_reminded_year END
                 WHERE owner_telegram_id = ? AND id = ?
                 """,
                 (
@@ -211,6 +213,7 @@ class Storage:
                     remind_time,
                     remind_timezone,
                     note,
+                    int(reset_last_reminded),
                     owner_telegram_id,
                     record_id,
                 ),
