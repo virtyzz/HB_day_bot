@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from html import escape
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -327,6 +328,20 @@ def register_handlers(storage: Storage, config: Config) -> Router:
             return
         await callback.answer()
         await show_birthdays_list(callback.message, storage, callback.from_user.id, edit=True)
+
+    @router.callback_query(F.data == "records_all")
+    async def show_all_birthdays(callback: CallbackQuery) -> None:
+        if not callback.from_user or not callback.message:
+            return
+        records = await storage.list_birthdays(callback.from_user.id)
+        await callback.answer()
+        if not records:
+            await show_menu(callback.message, "У вас пока нет записей.", edit=True)
+            return
+        pages = _format_all_records_pages(records)
+        await show_menu(callback.message, pages[0], all_records_keyboard(), edit=True)
+        for page in pages[1:]:
+            await callback.message.answer(page)
 
     @router.callback_query(F.data.startswith("record:"))
     async def show_record(callback: CallbackQuery, state: FSMContext) -> None:
@@ -783,10 +798,20 @@ def add_step_keyboard(*, can_go_back: bool = True) -> InlineKeyboardMarkup:
 
 
 def records_keyboard(records: list[BirthdayRecord]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="Показать все ДР", callback_data="records_all")]]
+    rows.extend(
+        [InlineKeyboardButton(text=record.full_name, callback_data=f"record:{record.id}")]
+        for record in records
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=rows
+    )
+
+
+def all_records_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=record.full_name, callback_data=f"record:{record.id}")]
-            for record in records
+            [InlineKeyboardButton(text="Назад", callback_data="list")],
         ]
     )
 
@@ -1195,6 +1220,39 @@ def _format_record(record: BirthdayRecord) -> str:
         f"Напоминание: {record.remind_time} {_timezone_display(record.remind_timezone)}"
         f"{note}"
     )
+
+
+def _format_all_records_pages(records: list[BirthdayRecord]) -> list[str]:
+    pages = []
+    header = [f"<b>Все ДР</b>", f"Всего записей: {len(records)}"]
+    lines = header.copy()
+    for index, record in enumerate(records, start=1):
+        record_lines = [
+            "",
+            f"<b>{index}. {escape(record.full_name)}</b>",
+            f"Дата рождения: {_format_birthday_date(record)}",
+            f"Напоминание: {escape(record.remind_time)} {_format_timezone_html(record.remind_timezone)}",
+        ]
+        if record.year:
+            record_lines.append(f"Возраст в этом году: {datetime.now().year - record.year}")
+        if record.note:
+            record_lines.append(f"Примечание: {escape(record.note)}")
+        if len("\n".join([*lines, *record_lines])) > 3900:
+            pages.append("\n".join(lines))
+            lines = [f"<b>Все ДР, продолжение</b>", *record_lines]
+        else:
+            lines.extend(record_lines)
+    pages.append("\n".join(lines))
+    return pages
+
+
+def _format_birthday_date(record: BirthdayRecord) -> str:
+    year = f".{record.year}" if record.year else ""
+    return f"{record.day:02d}.{record.month:02d}{year}"
+
+
+def _format_timezone_html(timezone: str) -> str:
+    return escape(_timezone_display(timezone))
 
 
 def _edit_prompt(field: str, record: BirthdayRecord) -> str:
