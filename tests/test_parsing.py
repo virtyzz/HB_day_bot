@@ -1,7 +1,9 @@
 import unittest
 from datetime import datetime
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import hb_day_bot.handlers as handlers
 from hb_day_bot.models import BirthdayRecord
 from hb_day_bot.parsing import parse_birthday_date, parse_reminder_time
 from hb_day_bot.reminder_logic import is_due
@@ -66,6 +68,30 @@ class ReminderLogicTestCase(unittest.TestCase):
         now = datetime(2026, 7, 8, 10, 0, tzinfo=ZoneInfo("Asia/Novosibirsk"))
 
         self.assertFalse(is_due(record, now))
+
+
+class BirthdayFormattingTestCase(unittest.TestCase):
+    def test_age_uses_current_date_not_only_year(self) -> None:
+        record = BirthdayRecord(
+            id=1,
+            owner_telegram_id=10,
+            full_name="Test User",
+            day=12,
+            month=12,
+            year=2000,
+            remind_time="09:00",
+            remind_timezone="Asia/Novosibirsk",
+            note=None,
+            last_reminded_year=None,
+        )
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 7, 8)
+
+        with patch.object(handlers, "datetime", FixedDateTime):
+            self.assertEqual(handlers._format_record_age(record), "25")
 
 
 if __name__ == "__main__":

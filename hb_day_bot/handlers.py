@@ -1357,7 +1357,13 @@ def _format_record_rich_table_row(index: int, record: BirthdayRecord) -> str:
 
 
 def _format_record_age(record: BirthdayRecord) -> str:
-    return str(datetime.now().year - record.year) if record.year else ""
+    if not record.year:
+        return ""
+    today = datetime.now(ZoneInfo(record.remind_timezone)).date()
+    age = today.year - record.year
+    if (today.month, today.day) < (record.month, record.day):
+        age -= 1
+    return str(age)
 
 
 def _join_rich_lines(lines: list[str | Text]) -> list[str | Text]:
