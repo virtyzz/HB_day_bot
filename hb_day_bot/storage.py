@@ -154,7 +154,7 @@ class Storage:
                 """
                 SELECT * FROM birthdays
                 WHERE owner_telegram_id = ?
-                ORDER BY month, day, full_name
+                ORDER BY id ASC
                 """,
                 (owner_telegram_id,),
             ) as cursor:

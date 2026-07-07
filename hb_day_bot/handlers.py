@@ -17,7 +17,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
 )
-from aiogram.utils.formatting import Bold, Text
+from aiogram.utils.formatting import Bold, Pre, Text
 
 from .config import Config
 from .models import BirthdayRecord
@@ -1276,37 +1276,114 @@ def _format_record(record: BirthdayRecord) -> str:
 
 def _format_all_records_pages(records: list[BirthdayRecord]) -> list[str]:
     pages = []
-    lines = [_all_records_header(records)]
+    rows: list[tuple[int, BirthdayRecord]] = []
     for index, record in enumerate(records, start=1):
-        record_block = _format_all_record_block(index, record)
-        if len(_as_rich_page([*lines, record_block])) > 3900:
-            pages.append(_as_rich_page(lines))
-            lines = [Bold("Все ДР, продолжение"), record_block]
+        candidate_rows = [*rows, (index, record)]
+        candidate_page = _format_all_records_table_page(
+            records_count=len(records),
+            rows=candidate_rows,
+            continuation=bool(pages),
+        )
+        if len(candidate_page) > 3900 and rows:
+            pages.append(
+                _format_all_records_table_page(
+                    records_count=len(records),
+                    rows=rows,
+                    continuation=bool(pages),
+                )
+            )
+            rows = [(index, record)]
         else:
-            lines.append(record_block)
-    pages.append(_as_rich_page(lines))
+            rows = candidate_rows
+    if rows:
+        pages.append(
+            _format_all_records_table_page(
+                records_count=len(records),
+                rows=rows,
+                continuation=bool(pages),
+            )
+        )
     return pages
 
 
-def _all_records_header(records: list[BirthdayRecord]) -> Text:
+def _format_all_records_table_page(
+    *,
+    records_count: int,
+    rows: list[tuple[int, BirthdayRecord]],
+    continuation: bool,
+) -> str:
     return Text(
-        Bold("Все ДР"),
+        Bold("Все ДР, продолжение" if continuation else "Все ДР"),
         "\n",
-        f"Всего записей: {len(records)}",
+        f"Всего записей: {records_count}",
+        "\n\n",
+        Pre(_format_records_table(rows)),
+    ).as_html()
+
+
+def _format_records_table(rows: list[tuple[int, BirthdayRecord]]) -> str:
+    widths = {
+        "index": 3,
+        "name": 22,
+        "date": 10,
+        "time": 5,
+        "timezone": 18,
+        "note": 18,
+    }
+    header = _format_table_row(
+        ("№", "ФИО", "Дата", "Время", "Пояс", "Примечание"),
+        widths,
+    )
+    separator = _format_table_row(
+        (
+            "-" * widths["index"],
+            "-" * widths["name"],
+            "-" * widths["date"],
+            "-" * widths["time"],
+            "-" * widths["timezone"],
+            "-" * widths["note"],
+        ),
+        widths,
+    )
+    table_rows = [header, separator]
+    table_rows.extend(_format_record_table_row(index, record, widths) for index, record in rows)
+    return "\n".join(table_rows)
+
+
+def _format_record_table_row(index: int, record: BirthdayRecord, widths: dict[str, int]) -> str:
+    note = record.note or ""
+    return _format_table_row(
+        (
+            str(index),
+            record.full_name,
+            _format_birthday_date(record),
+            record.remind_time,
+            _timezone_display(record.remind_timezone),
+            note,
+        ),
+        widths,
     )
 
 
-def _format_all_record_block(index: int, record: BirthdayRecord) -> Text:
-    lines = [
-        Bold(f"{index}. {record.full_name}"),
-        f"Дата рождения: {_format_birthday_date(record)}",
-        f"Напоминание: {record.remind_time} {_timezone_display(record.remind_timezone)}",
-    ]
-    if record.year:
-        lines.append(f"Возраст в этом году: {datetime.now().year - record.year}")
-    if record.note:
-        lines.append(f"Примечание: {record.note}")
-    return Text(*_join_rich_lines(lines))
+def _format_table_row(values: tuple[str, str, str, str, str, str], widths: dict[str, int]) -> str:
+    index, name, birthday, remind_time, timezone, note = values
+    return (
+        f"{_fit_table_cell(index, widths['index'], align='right')} "
+        f"{_fit_table_cell(name, widths['name'])} "
+        f"{_fit_table_cell(birthday, widths['date'])} "
+        f"{_fit_table_cell(remind_time, widths['time'])} "
+        f"{_fit_table_cell(timezone, widths['timezone'])} "
+        f"{_fit_table_cell(note, widths['note'])}"
+    )
+
+
+def _fit_table_cell(value: str, width: int, *, align: str = "left") -> str:
+    value = " ".join(str(value).split())
+    if len(value) > width:
+        value = value[: max(0, width - 3)] + "..."
+    if align == "right":
+        return value.rjust(width)
+    return value.ljust(width)
 
 
 def _join_rich_lines(lines: list[str | Text]) -> list[str | Text]:
@@ -1316,15 +1393,6 @@ def _join_rich_lines(lines: list[str | Text]) -> list[str | Text]:
             joined.append("\n")
         joined.append(line)
     return joined
-
-
-def _as_rich_page(blocks: list[Text]) -> str:
-    page_parts: list[str | Text] = []
-    for index, block in enumerate(blocks):
-        if index:
-            page_parts.append("\n\n")
-        page_parts.append(block)
-    return Text(*page_parts).as_html()
 
 
 def _format_birthday_date(record: BirthdayRecord) -> str:
