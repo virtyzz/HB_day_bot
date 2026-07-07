@@ -31,6 +31,8 @@ LIST_BUTTON = "Посмотреть список"
 CLEAR_BUTTON = "Очистить список"
 ADMIN_BUTTON = "Админка"
 TIMEZONE_PAGE_SIZE = 10
+ADD_CANCEL_CALLBACK = "add_cancel"
+ADD_BACK_CALLBACK = "add_back"
 TIMEZONE_CHOICES = [
     ("UTC-12", "Etc/GMT+12"),
     ("UTC-11", "Etc/GMT+11"),
@@ -105,10 +107,52 @@ def register_handlers(storage: Storage, config: Config) -> Router:
 
     @router.message(Command("cancel"))
     async def cancel(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
+        await _delete_add_menu(message, data)
+        await _delete_message(message)
         await state.clear()
         await message.answer(
             "Отменено.",
             reply_markup=main_menu(_is_admin(message, config)),
+        )
+
+    @router.callback_query(F.data == ADD_CANCEL_CALLBACK)
+    async def add_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+        if not callback.message:
+            return
+        await state.clear()
+        await callback.answer("Отменено")
+        await show_menu(
+            callback.message,
+            "Добавление ДР отменено. Данные не сохранены.",
+            edit=True,
+        )
+
+    @router.callback_query(F.data == ADD_BACK_CALLBACK)
+    async def add_back(callback: CallbackQuery, state: FSMContext) -> None:
+        if not callback.message:
+            return
+        current_state = await state.get_state()
+        previous_state = _previous_add_state(current_state)
+        if not previous_state:
+            await callback.answer()
+            await state.set_state(AddBirthday.full_name)
+            await _clear_add_fields_from(state, AddBirthday.full_name)
+            await _show_add_menu_from_callback(
+                callback,
+                state,
+                AddBirthday.full_name,
+                config.default_user_timezone,
+            )
+            return
+        await state.set_state(previous_state)
+        await _clear_add_fields_from(state, previous_state)
+        await callback.answer()
+        await _show_add_menu_from_callback(
+            callback,
+            state,
+            previous_state,
+            config.default_user_timezone,
         )
 
     @router.message(F.text == ADD_BUTTON)
@@ -116,19 +160,32 @@ def register_handlers(storage: Storage, config: Config) -> Router:
     async def add_start(message: Message, state: FSMContext) -> None:
         await state.clear()
         await state.set_state(AddBirthday.full_name)
-        await message.answer("Введите ФИО:")
+        sent = await message.answer(
+            _add_menu_text({}, AddBirthday.full_name),
+            reply_markup=add_step_keyboard(can_go_back=False),
+        )
+        await state.update_data(add_menu_message_id=sent.message_id)
+        await _delete_message(message)
 
     @router.message(AddBirthday.full_name, F.text)
     async def add_full_name(message: Message, state: FSMContext) -> None:
         full_name = message.text.strip()
         if not full_name:
-            await message.answer("ФИО не должно быть пустым.")
+            await _show_add_menu_from_message(
+                message,
+                state,
+                AddBirthday.full_name,
+                config.default_user_timezone,
+                error="ФИО не должно быть пустым.",
+            )
             return
         await state.update_data(full_name=full_name)
         await state.set_state(AddBirthday.birthday)
-        await message.answer(
-            "Введите дату рождения: DD.MM или DD.MM.YYYY.\n"
-            "Год можно не указывать, например: 21.07"
+        await _show_add_menu_from_message(
+            message,
+            state,
+            AddBirthday.birthday,
+            config.default_user_timezone,
         )
 
     @router.message(AddBirthday.birthday, F.text)
@@ -136,11 +193,22 @@ def register_handlers(storage: Storage, config: Config) -> Router:
         try:
             birthday = parse_birthday_date(message.text)
         except ValueError as exc:
-            await message.answer(f"Не получилось разобрать дату. {exc}")
+            await _show_add_menu_from_message(
+                message,
+                state,
+                AddBirthday.birthday,
+                config.default_user_timezone,
+                error=f"Не получилось разобрать дату. {exc}",
+            )
             return
         await state.update_data(day=birthday.day, month=birthday.month, year=birthday.year)
         await state.set_state(AddBirthday.remind_time)
-        await message.answer("Введите время напоминания HH:MM или отправьте '-' чтобы оставить 09:00:")
+        await _show_add_menu_from_message(
+            message,
+            state,
+            AddBirthday.remind_time,
+            config.default_user_timezone,
+        )
 
     @router.message(AddBirthday.remind_time, F.text)
     async def add_remind_time(message: Message, state: FSMContext) -> None:
@@ -151,19 +219,21 @@ def register_handlers(storage: Storage, config: Config) -> Router:
             try:
                 remind_time = parse_reminder_time(raw).strftime("%H:%M")
             except ValueError as exc:
-                await message.answer(f"Не получилось разобрать время. {exc}")
+                await _show_add_menu_from_message(
+                    message,
+                    state,
+                    AddBirthday.remind_time,
+                    config.default_user_timezone,
+                    error=f"Не получилось разобрать время. {exc}",
+                )
                 return
         await state.update_data(remind_time=remind_time)
         await state.set_state(AddBirthday.remind_timezone)
-        await message.answer(
-            "Введите часовой пояс напоминания, например Asia/Novosibirsk, "
-            "или отправьте '-' чтобы взять ваш сохраненный часовой пояс:",
-            reply_markup=timezone_keyboard(
-                "add",
-                0,
-                include_default=True,
-                default_timezone=config.default_user_timezone,
-            ),
+        await _show_add_menu_from_message(
+            message,
+            state,
+            AddBirthday.remind_timezone,
+            config.default_user_timezone,
         )
 
     @router.message(AddBirthday.remind_timezone, F.text)
@@ -180,11 +250,22 @@ def register_handlers(storage: Storage, config: Config) -> Router:
             try:
                 timezone = normalize_timezone(raw)
             except ValueError:
-                await message.answer("Не знаю такой часовой пояс. Пример: Asia/Novosibirsk")
+                await _show_add_menu_from_message(
+                    message,
+                    state,
+                    AddBirthday.remind_timezone,
+                    config.default_user_timezone,
+                    error="Не знаю такой часовой пояс. Пример: Asia/Novosibirsk",
+                )
                 return
         await state.update_data(remind_timezone=timezone)
         await state.set_state(AddBirthday.note)
-        await message.answer("Введите примечание или отправьте '-' чтобы оставить пустым:")
+        await _show_add_menu_from_message(
+            message,
+            state,
+            AddBirthday.note,
+            config.default_user_timezone,
+        )
 
     @router.message(AddBirthday.note, F.text)
     async def add_note(message: Message, state: FSMContext) -> None:
@@ -203,16 +284,25 @@ def register_handlers(storage: Storage, config: Config) -> Router:
             note=None if note in ("", "-") else note,
         )
         await state.clear()
+        await _delete_message(message)
         logger.info(
             "Добавлена запись ДР #%s пользователем %s: %s",
             record_id,
             _format_user(message.from_user),
             data["full_name"],
         )
-        await message.answer(
-            f"Запись #{record_id} сохранена.",
-            reply_markup=main_menu(_is_admin(message, config)),
-        )
+        menu_message_id = data.get("add_menu_message_id")
+        if menu_message_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=menu_message_id,
+                    text=f"Запись #{record_id} сохранена.",
+                )
+                return
+            except Exception:
+                pass
+        await message.answer(f"Запись #{record_id} сохранена.", reply_markup=main_menu(_is_admin(message, config)))
 
     @router.message(F.text == LIST_BUTTON)
     @router.message(Command("list"))
@@ -455,12 +545,25 @@ def register_handlers(storage: Storage, config: Config) -> Router:
         await message.answer(f"Готово. Ваш часовой пояс по умолчанию: {timezone}")
 
     @router.callback_query(F.data.startswith("tzpage:"))
-    async def timezone_page(callback: CallbackQuery) -> None:
+    async def timezone_page(callback: CallbackQuery, state: FSMContext) -> None:
         if not callback.message or not callback.data:
             return
         prefix, page_raw = callback.data.rsplit(":", 1)
         context = prefix.split(":", 1)[1]
         await callback.answer()
+        if context == "add":
+            await show_menu(
+                callback.message,
+                _add_menu_text(await state.get_data(), AddBirthday.remind_timezone),
+                timezone_keyboard(
+                    context,
+                    int(page_raw),
+                    include_default=True,
+                    default_timezone=config.default_user_timezone,
+                ),
+                edit=True,
+            )
+            return
         await show_menu(
             callback.message,
             _timezone_menu_text(context),
@@ -483,11 +586,13 @@ def register_handlers(storage: Storage, config: Config) -> Router:
         if context == "add":
             await state.update_data(remind_timezone=timezone)
             await state.set_state(AddBirthday.note)
-            await show_menu(
-                callback.message,
-                f"Часовой пояс: {_timezone_display(timezone)}\n\nВведите примечание или отправьте '-' чтобы оставить пустым:",
-                edit=True,
+            await _show_add_menu_from_callback(
+                callback,
+                state,
+                AddBirthday.note,
+                config.default_user_timezone,
             )
+            return
 
         if context.startswith("edit:"):
             record_id = int(context.split(":", 1)[1])
@@ -545,10 +650,11 @@ def register_handlers(storage: Storage, config: Config) -> Router:
         if context == "add":
             await state.update_data(remind_timezone=timezone)
             await state.set_state(AddBirthday.note)
-            await show_menu(
-                callback.message,
-                f"Часовой пояс: {_timezone_display(timezone)}\n\nВведите примечание или отправьте '-' чтобы оставить пустым:",
-                edit=True,
+            await _show_add_menu_from_callback(
+                callback,
+                state,
+                AddBirthday.note,
+                config.default_user_timezone,
             )
             return
         if context.startswith("edit:"):
@@ -657,6 +763,14 @@ def main_menu(is_admin: bool) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
+def add_step_keyboard(*, can_go_back: bool = True) -> InlineKeyboardMarkup:
+    row = []
+    if can_go_back:
+        row.append(InlineKeyboardButton(text="Назад", callback_data=ADD_BACK_CALLBACK))
+    row.append(InlineKeyboardButton(text="Отмена", callback_data=ADD_CANCEL_CALLBACK))
+    return InlineKeyboardMarkup(inline_keyboard=[row])
+
+
 def records_keyboard(records: list[BirthdayRecord]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -746,10 +860,224 @@ def timezone_keyboard(
                 )
             ]
         )
+    if context == "add":
+        rows.append(
+            [
+                InlineKeyboardButton(text="Назад", callback_data=ADD_BACK_CALLBACK),
+                InlineKeyboardButton(text="Отмена", callback_data=ADD_CANCEL_CALLBACK),
+            ]
+        )
     if context.startswith("edit:"):
         record_id = context.split(":", 1)[1]
         rows.append([InlineKeyboardButton(text="Назад", callback_data=f"edit:{record_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _add_cancel_hint() -> str:
+    return "Для отмены нажмите «Отмена» или отправьте /cancel."
+
+
+def _add_navigation_hint() -> str:
+    return "Можно вернуться назад, нажать «Отмена» или отправить /cancel."
+
+
+def _add_full_name_prompt() -> str:
+    return "Введите ФИО:\n\n" + _add_cancel_hint()
+
+
+def _add_birthday_prompt() -> str:
+    return (
+        "Введите дату рождения: DD.MM или DD.MM.YYYY.\n"
+        "Год можно не указывать, например: 21.07\n\n"
+        + _add_navigation_hint()
+    )
+
+
+def _add_remind_time_prompt() -> str:
+    return "Введите время напоминания HH:MM или отправьте '-' чтобы оставить 09:00:\n\n" + _add_navigation_hint()
+
+
+def _add_remind_timezone_prompt() -> str:
+    return (
+        "Введите часовой пояс напоминания, например Asia/Novosibirsk, "
+        "или отправьте '-' чтобы взять ваш сохраненный часовой пояс:\n\n"
+        + _add_navigation_hint()
+    )
+
+
+def _add_note_prompt() -> str:
+    return "Введите примечание или отправьте '-' чтобы оставить пустым:\n\n" + _add_navigation_hint()
+
+
+async def _show_add_menu_from_message(
+    message: Message,
+    state: FSMContext,
+    add_state: State,
+    default_timezone: str,
+    *,
+    error: str | None = None,
+) -> None:
+    data = await state.get_data()
+    text = _add_menu_text(data, add_state, error=error)
+    reply_markup = _add_reply_markup(add_state, default_timezone)
+    menu_message_id = data.get("add_menu_message_id")
+    if menu_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=menu_message_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+            await _delete_message(message)
+            return
+        except Exception:
+            pass
+    sent = await message.answer(text, reply_markup=reply_markup)
+    await state.update_data(add_menu_message_id=sent.message_id)
+    await _delete_message(message)
+
+
+async def _show_add_menu_from_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+    add_state: State,
+    default_timezone: str,
+    *,
+    error: str | None = None,
+) -> None:
+    if not callback.message:
+        return
+    text = _add_menu_text(await state.get_data(), add_state, error=error)
+    await show_menu(
+        callback.message,
+        text,
+        _add_reply_markup(add_state, default_timezone),
+        edit=True,
+    )
+
+
+async def _delete_message(message: Message) -> None:
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+async def _delete_add_menu(message: Message, data: dict[str, Any]) -> None:
+    menu_message_id = data.get("add_menu_message_id")
+    if not menu_message_id:
+        return
+    try:
+        await message.bot.delete_message(message.chat.id, menu_message_id)
+    except Exception:
+        pass
+
+
+async def _clear_add_fields_from(state: FSMContext, add_state: State) -> None:
+    fields_by_state = {
+        AddBirthday.full_name.state: {
+            "full_name": None,
+            "day": None,
+            "month": None,
+            "year": None,
+            "remind_time": None,
+            "remind_timezone": None,
+            "note": None,
+        },
+        AddBirthday.birthday.state: {
+            "day": None,
+            "month": None,
+            "year": None,
+            "remind_time": None,
+            "remind_timezone": None,
+            "note": None,
+        },
+        AddBirthday.remind_time.state: {
+            "remind_time": None,
+            "remind_timezone": None,
+            "note": None,
+        },
+        AddBirthday.remind_timezone.state: {
+            "remind_timezone": None,
+            "note": None,
+        },
+        AddBirthday.note.state: {
+            "note": None,
+        },
+    }
+    updates = fields_by_state.get(add_state.state)
+    if updates:
+        await state.update_data(**updates)
+
+
+def _add_menu_text(data: dict[str, Any], add_state: State, *, error: str | None = None) -> str:
+    lines = ["Добавление ДР", "", "Уже заполнено:"]
+    lines.append(f"ФИО: {_add_value(data.get('full_name'))}")
+    lines.append(f"Дата рождения: {_add_date_value(data)}")
+    lines.append(f"Время: {_add_value(data.get('remind_time'))}")
+    lines.append(f"Часовой пояс: {_add_timezone_value(data.get('remind_timezone'))}")
+    note = data.get("note")
+    if note:
+        lines.append(f"Примечание: {note}")
+    if error:
+        lines.extend(["", f"Ошибка: {error}"])
+    lines.extend(["", _add_prompt(add_state)])
+    return "\n".join(lines)
+
+
+def _add_value(value: Any) -> str:
+    return str(value) if value else "не заполнено"
+
+
+def _add_date_value(data: dict[str, Any]) -> str:
+    day = data.get("day")
+    month = data.get("month")
+    if not day or not month:
+        return "не заполнено"
+    year = data.get("year")
+    suffix = f".{year}" if year else ""
+    return f"{int(day):02d}.{int(month):02d}{suffix}"
+
+
+def _add_timezone_value(value: Any) -> str:
+    return _timezone_display(str(value)) if value else "не заполнено"
+
+
+def _previous_add_state(current_state: str | None) -> State | None:
+    previous_states = {
+        AddBirthday.birthday.state: AddBirthday.full_name,
+        AddBirthday.remind_time.state: AddBirthday.birthday,
+        AddBirthday.remind_timezone.state: AddBirthday.remind_time,
+        AddBirthday.note.state: AddBirthday.remind_timezone,
+    }
+    return previous_states.get(current_state)
+
+
+def _add_prompt(state: State) -> str:
+    state_name = state.state
+    prompts = {
+        AddBirthday.full_name.state: _add_full_name_prompt(),
+        AddBirthday.birthday.state: _add_birthday_prompt(),
+        AddBirthday.remind_time.state: _add_remind_time_prompt(),
+        AddBirthday.remind_timezone.state: _add_remind_timezone_prompt(),
+        AddBirthday.note.state: _add_note_prompt(),
+    }
+    return prompts.get(state_name, _add_full_name_prompt())
+
+
+def _add_reply_markup(state: State, default_timezone: str) -> InlineKeyboardMarkup:
+    state_name = state.state
+    if state_name == AddBirthday.full_name.state:
+        return add_step_keyboard(can_go_back=False)
+    if state_name == AddBirthday.remind_timezone.state:
+        return timezone_keyboard(
+            "add",
+            0,
+            include_default=True,
+            default_timezone=default_timezone,
+        )
+    return add_step_keyboard()
 
 
 def _timezone_menu_text(context: str) -> str:
@@ -758,7 +1086,8 @@ def _timezone_menu_text(context: str) -> str:
     if context == "add":
         return (
             "Выберите часовой пояс напоминания или отправьте его текстом, например Asia/Novosibirsk.\n"
-            "Можно отправить '-' чтобы взять ваш сохраненный часовой пояс."
+            "Можно отправить '-' чтобы взять ваш сохраненный часовой пояс.\n\n"
+            + _add_navigation_hint()
         )
     return "Выберите новый часовой пояс или отправьте его текстом, например Asia/Novosibirsk."
 
