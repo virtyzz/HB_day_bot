@@ -25,7 +25,7 @@ async def run_reminder_loop(
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("Reminder loop failed")
+            logger.exception("Ошибка в цикле проверки напоминаний")
         await asyncio.sleep(interval_seconds)
 
 
@@ -37,3 +37,11 @@ async def send_due_reminders(bot: Bot, storage: Storage) -> None:
 
         await bot.send_message(record.owner_telegram_id, format_reminder(record, now.year))
         await storage.mark_reminded(record.id, now.year)
+        logger.info(
+            "Отправлено напоминание: запись #%s, пользователь %s, дата %02d.%02d, часовой пояс %s",
+            record.id,
+            record.owner_telegram_id,
+            record.day,
+            record.month,
+            record.remind_timezone,
+        )
