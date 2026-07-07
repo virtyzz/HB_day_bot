@@ -160,11 +160,15 @@ def register_handlers(storage: Storage, config: Config) -> Router:
     async def add_start(message: Message, state: FSMContext) -> None:
         await state.clear()
         await state.set_state(AddBirthday.full_name)
-        sent = await message.answer(
-            _add_menu_text({}, AddBirthday.full_name),
+        summary = await message.answer(_add_summary_text({}))
+        prompt = await message.answer(
+            _add_prompt(AddBirthday.full_name),
             reply_markup=add_step_keyboard(can_go_back=False),
         )
-        await state.update_data(add_menu_message_id=sent.message_id)
+        await state.update_data(
+            add_summary_message_id=summary.message_id,
+            add_prompt_message_id=prompt.message_id,
+        )
         await _delete_message(message)
 
     @router.message(AddBirthday.full_name, F.text)
@@ -291,12 +295,18 @@ def register_handlers(storage: Storage, config: Config) -> Router:
             _format_user(message.from_user),
             data["full_name"],
         )
-        menu_message_id = data.get("add_menu_message_id")
-        if menu_message_id:
+        summary_message_id = data.get("add_summary_message_id") or data.get("add_menu_message_id")
+        prompt_message_id = data.get("add_prompt_message_id")
+        if prompt_message_id:
+            try:
+                await message.bot.delete_message(message.chat.id, prompt_message_id)
+            except Exception:
+                pass
+        if summary_message_id:
             try:
                 await message.bot.edit_message_text(
                     chat_id=message.chat.id,
-                    message_id=menu_message_id,
+                    message_id=summary_message_id,
                     text=f"Запись #{record_id} сохранена.",
                 )
                 return
@@ -552,16 +562,17 @@ def register_handlers(storage: Storage, config: Config) -> Router:
         context = prefix.split(":", 1)[1]
         await callback.answer()
         if context == "add":
-            await show_menu(
-                callback.message,
-                _add_menu_text(await state.get_data(), AddBirthday.remind_timezone),
-                timezone_keyboard(
+            await _show_add_menu_from_callback(
+                callback,
+                state,
+                AddBirthday.remind_timezone,
+                config.default_user_timezone,
+                reply_markup=timezone_keyboard(
                     context,
                     int(page_raw),
                     include_default=True,
                     default_timezone=config.default_user_timezone,
                 ),
-                edit=True,
             )
             return
         await show_menu(
@@ -873,40 +884,30 @@ def timezone_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _add_cancel_hint() -> str:
-    return "Для отмены нажмите «Отмена» или отправьте /cancel."
-
-
-def _add_navigation_hint() -> str:
-    return "Можно вернуться назад, нажать «Отмена» или отправить /cancel."
-
-
 def _add_full_name_prompt() -> str:
-    return "Введите ФИО:\n\n" + _add_cancel_hint()
+    return "Введите ФИО:"
 
 
 def _add_birthday_prompt() -> str:
     return (
         "Введите дату рождения: DD.MM или DD.MM.YYYY.\n"
-        "Год можно не указывать, например: 21.07\n\n"
-        + _add_navigation_hint()
+        "Год можно не указывать, например: 21.07"
     )
 
 
 def _add_remind_time_prompt() -> str:
-    return "Введите время напоминания HH:MM или отправьте '-' чтобы оставить 09:00:\n\n" + _add_navigation_hint()
+    return "Введите время напоминания HH:MM или отправьте '-' чтобы оставить 09:00:"
 
 
 def _add_remind_timezone_prompt() -> str:
     return (
         "Введите часовой пояс напоминания, например Asia/Novosibirsk, "
-        "или отправьте '-' чтобы взять ваш сохраненный часовой пояс:\n\n"
-        + _add_navigation_hint()
+        "или отправьте '-' чтобы взять ваш сохраненный часовой пояс:"
     )
 
 
 def _add_note_prompt() -> str:
-    return "Введите примечание или отправьте '-' чтобы оставить пустым:\n\n" + _add_navigation_hint()
+    return "Введите примечание или отправьте '-' чтобы оставить пустым:"
 
 
 async def _show_add_menu_from_message(
@@ -916,25 +917,18 @@ async def _show_add_menu_from_message(
     default_timezone: str,
     *,
     error: str | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     data = await state.get_data()
-    text = _add_menu_text(data, add_state, error=error)
-    reply_markup = _add_reply_markup(add_state, default_timezone)
-    menu_message_id = data.get("add_menu_message_id")
-    if menu_message_id:
-        try:
-            await message.bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=menu_message_id,
-                text=text,
-                reply_markup=reply_markup,
-            )
-            await _delete_message(message)
-            return
-        except Exception:
-            pass
-    sent = await message.answer(text, reply_markup=reply_markup)
-    await state.update_data(add_menu_message_id=sent.message_id)
+    await _render_add_menu(
+        message,
+        state,
+        data,
+        add_state,
+        default_timezone,
+        error=error,
+        reply_markup=reply_markup,
+    )
     await _delete_message(message)
 
 
@@ -945,16 +939,63 @@ async def _show_add_menu_from_callback(
     default_timezone: str,
     *,
     error: str | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     if not callback.message:
         return
-    text = _add_menu_text(await state.get_data(), add_state, error=error)
-    await show_menu(
+    await _render_add_menu(
         callback.message,
-        text,
-        _add_reply_markup(add_state, default_timezone),
-        edit=True,
+        state,
+        await state.get_data(),
+        add_state,
+        default_timezone,
+        error=error,
+        reply_markup=reply_markup,
     )
+
+
+async def _render_add_menu(
+    message: Message,
+    state: FSMContext,
+    data: dict[str, Any],
+    add_state: State,
+    default_timezone: str,
+    *,
+    error: str | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    summary_text = _add_summary_text(data)
+    prompt_text = _add_prompt_text(add_state, error=error)
+    prompt_markup = reply_markup or _add_reply_markup(add_state, default_timezone)
+    summary_message_id = data.get("add_summary_message_id")
+    prompt_message_id = data.get("add_prompt_message_id") or data.get("add_menu_message_id")
+
+    if summary_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=summary_message_id,
+                text=summary_text,
+            )
+        except Exception:
+            pass
+    if prompt_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=prompt_message_id,
+                text=prompt_text,
+                reply_markup=prompt_markup,
+            )
+            return
+        except Exception:
+            pass
+
+    if not summary_message_id:
+        summary = await message.answer(summary_text)
+        await state.update_data(add_summary_message_id=summary.message_id)
+    prompt = await message.answer(prompt_text, reply_markup=prompt_markup)
+    await state.update_data(add_prompt_message_id=prompt.message_id)
 
 
 async def _delete_message(message: Message) -> None:
@@ -965,13 +1006,18 @@ async def _delete_message(message: Message) -> None:
 
 
 async def _delete_add_menu(message: Message, data: dict[str, Any]) -> None:
-    menu_message_id = data.get("add_menu_message_id")
-    if not menu_message_id:
-        return
-    try:
-        await message.bot.delete_message(message.chat.id, menu_message_id)
-    except Exception:
-        pass
+    message_ids = (
+        data.get("add_summary_message_id"),
+        data.get("add_prompt_message_id"),
+        data.get("add_menu_message_id"),
+    )
+    for message_id in dict.fromkeys(message_ids):
+        if not message_id:
+            continue
+        try:
+            await message.bot.delete_message(message.chat.id, message_id)
+        except Exception:
+            pass
 
 
 async def _clear_add_fields_from(state: FSMContext, add_state: State) -> None:
@@ -1011,8 +1057,8 @@ async def _clear_add_fields_from(state: FSMContext, add_state: State) -> None:
         await state.update_data(**updates)
 
 
-def _add_menu_text(data: dict[str, Any], add_state: State, *, error: str | None = None) -> str:
-    lines = ["Добавление ДР", "", "Уже заполнено:"]
+def _add_summary_text(data: dict[str, Any]) -> str:
+    lines = ["Уже заполнено:"]
     lines.append(f"ФИО: {_add_value(data.get('full_name'))}")
     lines.append(f"Дата рождения: {_add_date_value(data)}")
     lines.append(f"Время: {_add_value(data.get('remind_time'))}")
@@ -1020,9 +1066,14 @@ def _add_menu_text(data: dict[str, Any], add_state: State, *, error: str | None 
     note = data.get("note")
     if note:
         lines.append(f"Примечание: {note}")
+    return "\n".join(lines)
+
+
+def _add_prompt_text(add_state: State, *, error: str | None = None) -> str:
+    lines = []
     if error:
-        lines.extend(["", f"Ошибка: {error}"])
-    lines.extend(["", _add_prompt(add_state)])
+        lines.extend([f"Ошибка: {error}", ""])
+    lines.append(_add_prompt(add_state))
     return "\n".join(lines)
 
 
@@ -1086,8 +1137,7 @@ def _timezone_menu_text(context: str) -> str:
     if context == "add":
         return (
             "Выберите часовой пояс напоминания или отправьте его текстом, например Asia/Novosibirsk.\n"
-            "Можно отправить '-' чтобы взять ваш сохраненный часовой пояс.\n\n"
-            + _add_navigation_hint()
+            "Можно отправить '-' чтобы взять ваш сохраненный часовой пояс."
         )
     return "Выберите новый часовой пояс или отправьте его текстом, например Asia/Novosibirsk."
 
