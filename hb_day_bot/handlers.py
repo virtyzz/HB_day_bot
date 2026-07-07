@@ -277,7 +277,12 @@ def register_handlers(storage: Storage, config: Config) -> Router:
             await show_menu(
                 callback.message,
                 "Выберите новый часовой пояс или отправьте его текстом, например Asia/Novosibirsk.",
-                timezone_keyboard(f"edit:{record_id}", 0),
+                timezone_keyboard(
+                    f"edit:{record_id}",
+                    0,
+                    include_default=True,
+                    default_timezone=config.default_user_timezone,
+                ),
                 edit=True,
             )
             return
@@ -481,6 +486,42 @@ def register_handlers(storage: Storage, config: Config) -> Router:
             await show_menu(
                 callback.message,
                 f"Часовой пояс: {_timezone_display(timezone)}\n\nВведите примечание или отправьте '-' чтобы оставить пустым:",
+                edit=True,
+            )
+
+        if context.startswith("edit:"):
+            record_id = int(context.split(":", 1)[1])
+            record = await storage.get_birthday(callback.from_user.id, record_id)
+            if not record:
+                await state.clear()
+                await show_menu(callback.message, "Запись не найдена.", edit=True)
+                return
+            updated = _record_to_dict(record)
+            updated["remind_timezone"] = timezone
+            await storage.update_birthday(
+                owner_telegram_id=callback.from_user.id,
+                record_id=record.id,
+                full_name=updated["full_name"],
+                day=updated["day"],
+                month=updated["month"],
+                year=updated["year"],
+                remind_time=updated["remind_time"],
+                remind_timezone=updated["remind_timezone"],
+                note=updated["note"],
+                reset_last_reminded=_reminder_schedule_changed(record, updated),
+            )
+            await state.clear()
+            logger.info(
+                "Пользователь %s изменил часовой пояс записи #%s: %s",
+                _format_user(callback.from_user),
+                record.id,
+                timezone,
+            )
+            refreshed = await storage.get_birthday(callback.from_user.id, record.id)
+            await show_menu(
+                callback.message,
+                "Изменено.\n\n" + _format_record(refreshed or record),
+                record_keyboard(record.id),
                 edit=True,
             )
 
@@ -723,10 +764,7 @@ def _timezone_menu_text(context: str) -> str:
 
 
 def _timezone_display(timezone: str) -> str:
-    for label, name in TIMEZONE_CHOICES:
-        if name == timezone:
-            return f"{label} ({name})"
-    return timezone
+    return f"{_timezone_utc_offset(timezone)} ({timezone})"
 
 
 def _timezone_utc_offset(timezone: str) -> str:
@@ -775,7 +813,7 @@ def _format_record(record: BirthdayRecord) -> str:
     return (
         f"#{record.id} {record.full_name}\n"
         f"Дата: {record.day:02d}.{record.month:02d}{year}\n"
-        f"Напоминание: {record.remind_time} {record.remind_timezone}"
+        f"Напоминание: {record.remind_time} {_timezone_display(record.remind_timezone)}"
         f"{note}"
     )
 
@@ -787,7 +825,7 @@ def _edit_prompt(field: str, record: BirthdayRecord) -> str:
         "remind_time": f"Введите новое время HH:MM или '-' для 09:00.\nСейчас: {record.remind_time}",
         "remind_timezone": (
             "Введите новый часовой пояс, например Asia/Novosibirsk.\n"
-            f"Сейчас: {record.remind_timezone}"
+            f"Сейчас: {_timezone_display(record.remind_timezone)}"
         ),
         "note": "Введите новое примечание или '-' чтобы очистить его.",
     }
