@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from html import escape
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -18,6 +17,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
 )
+from aiogram.utils.formatting import Bold, Text
 
 from .config import Config
 from .models import BirthdayRecord
@@ -161,7 +161,7 @@ def register_handlers(storage: Storage, config: Config) -> Router:
     async def add_start(message: Message, state: FSMContext) -> None:
         await state.clear()
         await state.set_state(AddBirthday.full_name)
-        summary = await message.answer(_add_summary_text({}))
+        summary = await message.answer(_add_summary_text({}, AddBirthday.full_name))
         prompt = await message.answer(
             _add_prompt(AddBirthday.full_name),
             reply_markup=add_step_keyboard(can_go_back=False),
@@ -989,7 +989,7 @@ async def _render_add_menu(
     error: str | None = None,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
-    summary_text = _add_summary_text(data)
+    summary_text = _add_summary_text(data, add_state)
     prompt_text = _add_prompt_text(add_state, error=error)
     prompt_markup = reply_markup or _add_reply_markup(add_state, default_timezone)
     summary_message_id = data.get("add_summary_message_id")
@@ -1082,42 +1082,94 @@ async def _clear_add_fields_from(state: FSMContext, add_state: State) -> None:
         await state.update_data(**updates)
 
 
-def _add_summary_text(data: dict[str, Any]) -> str:
-    lines = ["Уже заполнено:"]
-    lines.append(f"ФИО: {_add_value(data.get('full_name'))}")
-    lines.append(f"Дата рождения: {_add_date_value(data)}")
-    lines.append(f"Время: {_add_value(data.get('remind_time'))}")
-    lines.append(f"Часовой пояс: {_add_timezone_value(data.get('remind_timezone'))}")
-    note = data.get("note")
-    if note:
-        lines.append(f"Примечание: {note}")
-    return "\n".join(lines)
+def _add_summary_text(data: dict[str, Any], add_state: State) -> str:
+    return Text(
+        Bold("Добавление ДР"),
+        "\n",
+        "Текущий этап: ",
+        Bold(_add_step_title(add_state)),
+        "\n\n",
+        Bold("Заполнено"),
+        "\n",
+        _add_field_line("ФИО", data.get("full_name"), AddBirthday.full_name),
+        "\n",
+        _add_field_line("Дата рождения", _add_date_value(data), AddBirthday.birthday),
+        "\n",
+        _add_field_line("Время", data.get("remind_time"), AddBirthday.remind_time),
+        "\n",
+        _add_field_line("Часовой пояс", _add_timezone_value(data.get("remind_timezone")), AddBirthday.remind_timezone),
+        "\n",
+        _add_field_line("Примечание", data.get("note"), AddBirthday.note),
+        "\n\n",
+        Bold("Что осталось"),
+        "\n",
+        _add_remaining_text(data, add_state),
+    ).as_html()
 
 
 def _add_prompt_text(add_state: State, *, error: str | None = None) -> str:
-    lines = []
+    parts: list[str | Text] = []
     if error:
-        lines.extend([f"Ошибка: {error}", ""])
-    lines.append(_add_prompt(add_state))
-    return "\n".join(lines)
-
-
-def _add_value(value: Any) -> str:
-    return str(value) if value else "не заполнено"
+        parts.extend([Bold(f"Ошибка: {error}"), "\n\n"])
+    parts.append(_add_prompt(add_state))
+    return Text(*parts).as_html()
 
 
 def _add_date_value(data: dict[str, Any]) -> str:
     day = data.get("day")
     month = data.get("month")
     if not day or not month:
-        return "не заполнено"
+        return ""
     year = data.get("year")
     suffix = f".{year}" if year else ""
     return f"{int(day):02d}.{int(month):02d}{suffix}"
 
 
 def _add_timezone_value(value: Any) -> str:
-    return _timezone_display(str(value)) if value else "не заполнено"
+    return _timezone_display(str(value)) if value else ""
+
+
+def _add_field_line(label: str, value: Any, field_state: State) -> Text:
+    if value:
+        return Text("✓ ", Bold(label), ": ", str(value))
+    if field_state == AddBirthday.note:
+        return Text("○ ", Bold(label), ": можно оставить пустым")
+    return Text("○ ", Bold(label), ": не заполнено")
+
+
+def _add_remaining_text(data: dict[str, Any], add_state: State) -> Text:
+    remaining = []
+    for field_state, title, is_filled in _add_field_statuses(data):
+        if field_state == AddBirthday.note:
+            continue
+        if not is_filled:
+            remaining.append(title)
+    if not remaining and add_state == AddBirthday.note:
+        return Text("Осталось ввести примечание или отправить '-' для пустого поля.")
+    if not remaining:
+        return Text("Все обязательные поля заполнены.")
+    return Text(*_join_rich_lines([f"○ {title}" for title in remaining]))
+
+
+def _add_field_statuses(data: dict[str, Any]) -> list[tuple[State, str, bool]]:
+    return [
+        (AddBirthday.full_name, _add_step_title(AddBirthday.full_name), bool(data.get("full_name"))),
+        (AddBirthday.birthday, _add_step_title(AddBirthday.birthday), bool(data.get("day") and data.get("month"))),
+        (AddBirthday.remind_time, _add_step_title(AddBirthday.remind_time), bool(data.get("remind_time"))),
+        (AddBirthday.remind_timezone, _add_step_title(AddBirthday.remind_timezone), bool(data.get("remind_timezone"))),
+        (AddBirthday.note, _add_step_title(AddBirthday.note), bool(data.get("note"))),
+    ]
+
+
+def _add_step_title(state: State) -> str:
+    titles = {
+        AddBirthday.full_name.state: "ФИО",
+        AddBirthday.birthday.state: "Дата рождения",
+        AddBirthday.remind_time.state: "Время напоминания",
+        AddBirthday.remind_timezone.state: "Часовой пояс",
+        AddBirthday.note.state: "Примечание",
+    }
+    return titles.get(state.state, "Добавление")
 
 
 def _previous_add_state(current_state: str | None) -> State | None:
@@ -1224,35 +1276,60 @@ def _format_record(record: BirthdayRecord) -> str:
 
 def _format_all_records_pages(records: list[BirthdayRecord]) -> list[str]:
     pages = []
-    header = [f"<b>Все ДР</b>", f"Всего записей: {len(records)}"]
-    lines = header.copy()
+    lines = [_all_records_header(records)]
     for index, record in enumerate(records, start=1):
-        record_lines = [
-            "",
-            f"<b>{index}. {escape(record.full_name)}</b>",
-            f"Дата рождения: {_format_birthday_date(record)}",
-            f"Напоминание: {escape(record.remind_time)} {_format_timezone_html(record.remind_timezone)}",
-        ]
-        if record.year:
-            record_lines.append(f"Возраст в этом году: {datetime.now().year - record.year}")
-        if record.note:
-            record_lines.append(f"Примечание: {escape(record.note)}")
-        if len("\n".join([*lines, *record_lines])) > 3900:
-            pages.append("\n".join(lines))
-            lines = [f"<b>Все ДР, продолжение</b>", *record_lines]
+        record_block = _format_all_record_block(index, record)
+        if len(_as_rich_page([*lines, record_block])) > 3900:
+            pages.append(_as_rich_page(lines))
+            lines = [Bold("Все ДР, продолжение"), record_block]
         else:
-            lines.extend(record_lines)
-    pages.append("\n".join(lines))
+            lines.append(record_block)
+    pages.append(_as_rich_page(lines))
     return pages
+
+
+def _all_records_header(records: list[BirthdayRecord]) -> Text:
+    return Text(
+        Bold("Все ДР"),
+        "\n",
+        f"Всего записей: {len(records)}",
+    )
+
+
+def _format_all_record_block(index: int, record: BirthdayRecord) -> Text:
+    lines = [
+        Bold(f"{index}. {record.full_name}"),
+        f"Дата рождения: {_format_birthday_date(record)}",
+        f"Напоминание: {record.remind_time} {_timezone_display(record.remind_timezone)}",
+    ]
+    if record.year:
+        lines.append(f"Возраст в этом году: {datetime.now().year - record.year}")
+    if record.note:
+        lines.append(f"Примечание: {record.note}")
+    return Text(*_join_rich_lines(lines))
+
+
+def _join_rich_lines(lines: list[str | Text]) -> list[str | Text]:
+    joined: list[str | Text] = []
+    for index, line in enumerate(lines):
+        if index:
+            joined.append("\n")
+        joined.append(line)
+    return joined
+
+
+def _as_rich_page(blocks: list[Text]) -> str:
+    page_parts: list[str | Text] = []
+    for index, block in enumerate(blocks):
+        if index:
+            page_parts.append("\n\n")
+        page_parts.append(block)
+    return Text(*page_parts).as_html()
 
 
 def _format_birthday_date(record: BirthdayRecord) -> str:
     year = f".{record.year}" if record.year else ""
     return f"{record.day:02d}.{record.month:02d}{year}"
-
-
-def _format_timezone_html(timezone: str) -> str:
-    return escape(_timezone_display(timezone))
 
 
 def _edit_prompt(field: str, record: BirthdayRecord) -> str:
