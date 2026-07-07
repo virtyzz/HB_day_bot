@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from aiogram import BaseMiddleware, F, Router
 from aiogram.filters import Command
@@ -156,7 +158,12 @@ def register_handlers(storage: Storage, config: Config) -> Router:
         await message.answer(
             "Введите часовой пояс напоминания, например Asia/Novosibirsk, "
             "или отправьте '-' чтобы взять ваш сохраненный часовой пояс:",
-            reply_markup=timezone_keyboard("add", 0, include_default=True),
+            reply_markup=timezone_keyboard(
+                "add",
+                0,
+                include_default=True,
+                default_timezone=config.default_user_timezone,
+            ),
         )
 
     @router.message(AddBirthday.remind_timezone, F.text)
@@ -452,7 +459,12 @@ def register_handlers(storage: Storage, config: Config) -> Router:
         await show_menu(
             callback.message,
             _timezone_menu_text(context),
-            timezone_keyboard(context, int(page_raw), include_default=context == "add"),
+            timezone_keyboard(
+                context,
+                int(page_raw),
+                include_default=context == "add",
+                default_timezone=config.default_user_timezone,
+            ),
             edit=True,
         )
 
@@ -461,7 +473,7 @@ def register_handlers(storage: Storage, config: Config) -> Router:
         if not callback.from_user or not callback.message or not callback.data:
             return
         _, context = callback.data.split(":", 1)
-        timezone = await storage.get_user_timezone(callback.from_user.id, config.default_user_timezone)
+        timezone = config.default_user_timezone
         await callback.answer()
         if context == "add":
             await state.update_data(remind_timezone=timezone)
@@ -663,7 +675,13 @@ def admin_whitelist_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def timezone_keyboard(context: str, page: int, *, include_default: bool = False) -> InlineKeyboardMarkup:
+def timezone_keyboard(
+    context: str,
+    page: int,
+    *,
+    include_default: bool = False,
+    default_timezone: str = "UTC",
+) -> InlineKeyboardMarkup:
     total_pages = (len(TIMEZONE_CHOICES) + TIMEZONE_PAGE_SIZE - 1) // TIMEZONE_PAGE_SIZE
     page = max(0, min(page, total_pages - 1))
     start = page * TIMEZONE_PAGE_SIZE
@@ -679,7 +697,14 @@ def timezone_keyboard(context: str, page: int, *, include_default: bool = False)
     if nav:
         rows.append(nav)
     if include_default:
-        rows.append([InlineKeyboardButton(text="Мой часовой пояс", callback_data=f"tzdefault:{context}")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"По-умолчанию ({_timezone_utc_offset(default_timezone)})",
+                    callback_data=f"tzdefault:{context}",
+                )
+            ]
+        )
     if context.startswith("edit:"):
         record_id = context.split(":", 1)[1]
         rows.append([InlineKeyboardButton(text="Назад", callback_data=f"edit:{record_id}")])
@@ -702,6 +727,20 @@ def _timezone_display(timezone: str) -> str:
         if name == timezone:
             return f"{label} ({name})"
     return timezone
+
+
+def _timezone_utc_offset(timezone: str) -> str:
+    offset = datetime.now(ZoneInfo(timezone)).utcoffset()
+    if offset is None:
+        return "UTC+0"
+
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    total_minutes = abs(total_minutes)
+    hours, minutes = divmod(total_minutes, 60)
+    if minutes:
+        return f"UTC{sign}{hours}:{minutes:02d}"
+    return f"UTC{sign}{hours}"
 
 
 def _format_user(user: Any) -> str:
