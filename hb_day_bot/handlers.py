@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from html import escape
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -9,6 +10,7 @@ from aiogram import BaseMiddleware, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.types.input_rich_message import InputRichMessage
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -17,7 +19,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
 )
-from aiogram.utils.formatting import Bold, Pre, Text
+from aiogram.utils.formatting import Bold, Text
 
 from .config import Config
 from .models import BirthdayRecord
@@ -338,10 +340,14 @@ def register_handlers(storage: Storage, config: Config) -> Router:
         if not records:
             await show_menu(callback.message, "У вас пока нет записей.", edit=True)
             return
-        pages = _format_all_records_pages(records)
-        await show_menu(callback.message, pages[0], all_records_keyboard(), edit=True)
-        for page in pages[1:]:
-            await callback.message.answer(page)
+        await show_menu(
+            callback.message,
+            "Все ДР отправлены ниже.",
+            all_records_keyboard(),
+            edit=True,
+        )
+        for page in _format_all_records_rich_pages(records):
+            await callback.message.answer_rich(rich_message=InputRichMessage(html=page))
 
     @router.callback_query(F.data.startswith("record:"))
     async def show_record(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1274,19 +1280,19 @@ def _format_record(record: BirthdayRecord) -> str:
     )
 
 
-def _format_all_records_pages(records: list[BirthdayRecord]) -> list[str]:
+def _format_all_records_rich_pages(records: list[BirthdayRecord]) -> list[str]:
     pages = []
     rows: list[tuple[int, BirthdayRecord]] = []
     for index, record in enumerate(records, start=1):
         candidate_rows = [*rows, (index, record)]
-        candidate_page = _format_all_records_table_page(
+        candidate_page = _format_all_records_rich_table(
             records_count=len(records),
             rows=candidate_rows,
             continuation=bool(pages),
         )
-        if len(candidate_page) > 3900 and rows:
+        if len(candidate_page) > 30000 and rows:
             pages.append(
-                _format_all_records_table_page(
+                _format_all_records_rich_table(
                     records_count=len(records),
                     rows=rows,
                     continuation=bool(pages),
@@ -1297,7 +1303,7 @@ def _format_all_records_pages(records: list[BirthdayRecord]) -> list[str]:
             rows = candidate_rows
     if rows:
         pages.append(
-            _format_all_records_table_page(
+            _format_all_records_rich_table(
                 records_count=len(records),
                 rows=rows,
                 continuation=bool(pages),
@@ -1306,84 +1312,52 @@ def _format_all_records_pages(records: list[BirthdayRecord]) -> list[str]:
     return pages
 
 
-def _format_all_records_table_page(
+def _format_all_records_rich_table(
     *,
     records_count: int,
     rows: list[tuple[int, BirthdayRecord]],
     continuation: bool,
 ) -> str:
-    return Text(
-        Bold("Все ДР, продолжение" if continuation else "Все ДР"),
-        "\n",
-        f"Всего записей: {records_count}",
-        "\n\n",
-        Pre(_format_records_table(rows)),
-    ).as_html()
-
-
-def _format_records_table(rows: list[tuple[int, BirthdayRecord]]) -> str:
-    widths = {
-        "index": 3,
-        "name": 22,
-        "date": 10,
-        "time": 5,
-        "timezone": 18,
-        "note": 18,
-    }
-    header = _format_table_row(
-        ("№", "ФИО", "Дата", "Время", "Пояс", "Примечание"),
-        widths,
-    )
-    separator = _format_table_row(
-        (
-            "-" * widths["index"],
-            "-" * widths["name"],
-            "-" * widths["date"],
-            "-" * widths["time"],
-            "-" * widths["timezone"],
-            "-" * widths["note"],
-        ),
-        widths,
-    )
-    table_rows = [header, separator]
-    table_rows.extend(_format_record_table_row(index, record, widths) for index, record in rows)
-    return "\n".join(table_rows)
-
-
-def _format_record_table_row(index: int, record: BirthdayRecord, widths: dict[str, int]) -> str:
-    note = record.note or ""
-    return _format_table_row(
-        (
-            str(index),
-            record.full_name,
-            _format_birthday_date(record),
-            record.remind_time,
-            _timezone_display(record.remind_timezone),
-            note,
-        ),
-        widths,
+    caption = "Все ДР, продолжение" if continuation else "Все ДР"
+    return "\n".join(
+        [
+            f"<h1>{escape(caption)}</h1>",
+            f"<p>Всего записей: {records_count}</p>",
+            "<table bordered striped>",
+            "  <caption>Дни рождения</caption>",
+            "  <tr>",
+            "    <th>№</th>",
+            "    <th>ФИО</th>",
+            "    <th>Дата</th>",
+            "    <th>Возраст</th>",
+            "    <th>Время</th>",
+            "    <th>Пояс</th>",
+            "    <th>Примечание</th>",
+            "  </tr>",
+            *[_format_record_rich_table_row(index, record) for index, record in rows],
+            "</table>",
+        ]
     )
 
 
-def _format_table_row(values: tuple[str, str, str, str, str, str], widths: dict[str, int]) -> str:
-    index, name, birthday, remind_time, timezone, note = values
-    return (
-        f"{_fit_table_cell(index, widths['index'], align='right')} "
-        f"{_fit_table_cell(name, widths['name'])} "
-        f"{_fit_table_cell(birthday, widths['date'])} "
-        f"{_fit_table_cell(remind_time, widths['time'])} "
-        f"{_fit_table_cell(timezone, widths['timezone'])} "
-        f"{_fit_table_cell(note, widths['note'])}"
+def _format_record_rich_table_row(index: int, record: BirthdayRecord) -> str:
+    return "\n".join(
+        [
+            "  <tr>",
+            f"    <td>{index}</td>",
+            f"    <td>{escape(record.full_name)}</td>",
+            f"    <td>{escape(_format_birthday_date(record))}</td>",
+            f"    <td>{escape(_format_record_age(record))}</td>",
+            f"    <td>{escape(record.remind_time)}</td>",
+            f"    <td>{escape(_timezone_display(record.remind_timezone))}</td>",
+            f"    <td>{escape(record.note or '')}</td>",
+            "  </tr>",
+        ]
     )
 
 
-def _fit_table_cell(value: str, width: int, *, align: str = "left") -> str:
-    value = " ".join(str(value).split())
-    if len(value) > width:
-        value = value[: max(0, width - 3)] + "..."
-    if align == "right":
-        return value.rjust(width)
-    return value.ljust(width)
+def _format_record_age(record: BirthdayRecord) -> str:
+    return str(datetime.now().year - record.year) if record.year else ""
 
 
 def _join_rich_lines(lines: list[str | Text]) -> list[str | Text]:
